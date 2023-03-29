@@ -2,11 +2,12 @@ package pool
 
 import (
 	"errors"
-	"hash/crc32"
-	"sync"
-
 	"github.com/bitleak/go-redis-pool/v2/hashkit"
 	"github.com/go-redis/redis/v8"
+	"hash/crc32"
+	"runtime"
+	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -143,7 +144,7 @@ func (factory *ShardConnFactory) isCrossMultiShards(keys ...string) bool {
 
 type multiKeyFn func(factory *ShardConnFactory, keys ...string) redis.Cmder
 
-func (factory *ShardConnFactory) doMultiKeys(fn multiKeyFn, keys ...string) []redis.Cmder {
+func (factory *ShardConnFactory) doMultiKeysOld(fn multiKeyFn, keys ...string) []redis.Cmder {
 	if len(keys) == 1 {
 		return []redis.Cmder{fn(factory, keys...)}
 	}
@@ -166,6 +167,45 @@ func (factory *ShardConnFactory) doMultiKeys(fn multiKeyFn, keys ...string) []re
 		}(keyList)
 	}
 	wg.Wait()
+	return results
+}
+
+func (factory *ShardConnFactory) doMultiKeys(fn multiKeyFn, keys ...string) []redis.Cmder {
+	if len(keys) == 1 {
+		return []redis.Cmder{fn(factory, keys...)}
+	}
+
+	index2Keys := factory.groupKeysByInd(keys...)
+	index2KeysLen := len(index2Keys)
+
+	if index2KeysLen == 1 {
+		return []redis.Cmder{fn(factory, keys...)}
+	}
+
+	var workersDone atomic.Int32
+	totalWorkers := index2KeysLen
+
+	idx := 0
+	results := make([]redis.Cmder, index2KeysLen, index2KeysLen)
+
+	for _, keyList := range index2Keys {
+		idxCopy := idx
+		idx++
+
+		go func(idx int, workersDone *atomic.Int32, keyList []string) {
+			results[idx] = fn(factory, keyList...)
+			workersDone.Add(1)
+		}(idxCopy, &workersDone, keyList)
+	}
+
+	for {
+		if int(workersDone.Load()) == totalWorkers {
+			break
+		}
+
+		runtime.Gosched()
+	}
+
 	return results
 }
 
