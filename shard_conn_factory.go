@@ -182,24 +182,20 @@ func (factory *ShardConnFactory) doMultiKeys(fn multiKeyFn, keys ...string) []re
 		return []redis.Cmder{fn(factory, keys...)}
 	}
 
-	var workersDone atomic.Int32
-	totalWorkers := index2KeysLen
+	var idxAndWorkersDone = &atomic.Uint32{}
+	idxAndTotalWorkers := uint32(index2KeysLen * 2)
 
-	idx := 0
 	results := make([]redis.Cmder, index2KeysLen, index2KeysLen)
-
 	for _, keyList := range index2Keys {
-		idxCopy := idx
-		idx++
-
-		go func(idx int, workersDone *atomic.Int32, keyList []string) {
+		go func(workersDone *atomic.Uint32, keyList []string) {
+			idx := workersDone.Add(1) / 2
 			results[idx] = fn(factory, keyList...)
 			workersDone.Add(1)
-		}(idxCopy, &workersDone, keyList)
+		}(idxAndWorkersDone, keyList)
 	}
 
 	for {
-		if int(workersDone.Load()) == totalWorkers {
+		if idxAndWorkersDone.Load() == idxAndTotalWorkers {
 			break
 		}
 
